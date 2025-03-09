@@ -1,0 +1,240 @@
+// ComputeGPU.compute
+
+#pragma kernel CSMain
+
+RWStructuredBuffer<float3> verticesBuffer;
+int radius; 
+float randomStart;
+float frictionRate;
+float changeAmount;
+float evaporationRate;
+float volume;
+int size;
+
+struct Drop
+{
+    float3 velocity;
+    float sediment;
+    float volume;
+    float3 currentPos;
+    int currentIndex;
+};
+
+static int maxDepth = 500;
+static Drop drop;
+
+
+float AccountForVelocity(float yVal, int index)
+{
+    float adjustedVal = 0;
+    switch (index)
+    {
+    case 0:
+        adjustedVal = yVal + drop.velocity.x - drop.velocity.z;
+        break;
+    case 1:
+        adjustedVal = yVal - drop.velocity.z;
+        break;
+    case 2:
+        adjustedVal = yVal - drop.velocity.x - drop.velocity.z;
+        break;
+    case 3:
+        adjustedVal = yVal + drop.velocity.x;
+        break;
+    case 4:
+        adjustedVal = yVal - drop.velocity.x;
+        break;
+    case 5:
+        adjustedVal = yVal + drop.velocity.x + drop.velocity.z;
+        break;
+    case 6:
+        adjustedVal = yVal + drop.velocity.z;
+        break;
+    case 7:
+        adjustedVal = yVal - drop.velocity.x + drop.velocity.z;
+        break;
+    }
+    return adjustedVal;
+}
+
+void NeighbourPoints(int pointIndex, out int neighbourPoints[81])
+{
+    int rowLegnth = sqrt(size);
+    int count = 0;
+    
+    for (int x = 0; x < 100; x++)
+    {
+        if(x>=(radius * 2) + 1){break;}
+        
+        for (int y = 0; y < 100; y++)
+        {
+            if(y>=(radius * 2) + 1){break;}
+            neighbourPoints[count] = (pointIndex - (radius - y) + (rowLegnth * (radius - x)));
+            count++;
+        }
+    }
+}
+
+void SetVelocity(int selectedIndex, float change)
+{
+    if (selectedIndex == -1)
+    {
+        return;
+    }
+
+    switch (selectedIndex)
+    {
+    case 0:
+        drop.velocity += float3(-change/2, 0, change/2);
+        break;
+    case 1:
+        drop.velocity += float3(0, 0, change);
+        break;
+    case 2:
+        drop.velocity += float3(change/2, 0, change/2);
+        break;
+    case 3:
+        drop.velocity += float3(-change, 0,0);
+        break;
+    case 4:
+        drop.velocity += float3(change, 0, 0);
+        break;
+    case 5:
+        drop.velocity += float3(-change/2, 0, -change/2);
+        break;
+    case 6:
+        drop.velocity += float3(0, 0, -change);
+        break;
+    case 7:
+        drop.velocity += float3(change/2, 0, -change/2);
+        break;
+    }
+    drop.velocity *= frictionRate;
+}
+
+
+int myRandom(int x, int y, float seed)
+{
+    double doubleSeed = sin(seed/100000000);
+    double x_random = sin((x+1)*126311.65849*doubleSeed);
+    double y_random = sin((y+1)*625451.49778*doubleSeed);
+    double random = abs(sin(x_random*y_random+0.2));
+    int index = (int)(random * (size+70000));
+    return index;
+}
+
+[numthreads(32,32, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+
+    int depth = 0;
+    int rowLegnth = sqrt(size);
+    int rand = myRandom(id.x,id.y,randomStart);
+    float3 pos = verticesBuffer[rand];
+    drop.velocity=float3(0,0,0);
+    drop.sediment=0;
+    drop.volume=volume;
+    drop.currentPos=pos;
+    drop.currentIndex=rand;
+    for(int i = 0; i<501;i++)
+    {
+        depth++;
+        int index = drop.currentIndex;
+        if (depth > maxDepth )
+        {
+            break;
+        
+        }if (index >= size - (rowLegnth*radius) - 1 )
+        {
+            break;
+        }
+        if (index % rowLegnth < radius+1)
+        {
+            break;
+        }
+        if (index % rowLegnth > rowLegnth - 1-radius)
+        {
+            break;
+        }
+        if (index <= rowLegnth*radius)
+        {
+            break;
+        }
+        
+        float3 selectedPoint = float3(0, 100000000, 0);
+        int selectedIndex = -1;
+        float3 neighbors[8];
+        neighbors[0] = verticesBuffer[index - 1 + rowLegnth];
+        neighbors[1] = verticesBuffer[index + rowLegnth];
+        neighbors[2] = verticesBuffer[index + 1 + rowLegnth];
+        neighbors[3] = verticesBuffer[index - 1];
+        neighbors[4] = verticesBuffer[index + 1];
+        neighbors[5] = verticesBuffer[index - 1 - rowLegnth];
+        neighbors[6] = verticesBuffer[index - rowLegnth];
+        neighbors[7] = verticesBuffer[index + 1 - rowLegnth];
+        for (int i = 0; i < 8; i++)
+        {
+            float adjustedVal = AccountForVelocity(neighbors[i].y, i);
+            if (adjustedVal < selectedPoint.y)
+            {
+                selectedPoint = neighbors[i];
+                selectedIndex = i;
+            }
+        }
+        float finalAdjustedVal = AccountForVelocity(selectedPoint.y, selectedIndex);
+        if (finalAdjustedVal < drop.currentPos.y && drop.volume > 0.001f)
+        {
+            float3 newPos = selectedPoint;
+            float change = drop.currentPos.y - newPos.y;
+            drop.currentPos = pos;
+            float velocity = abs(drop.velocity.x) + abs(drop.velocity.z);
+            float maxSediment = drop.volume * velocity;
+            float sedimentDeposit = 0;
+            if (drop.sediment < maxSediment)
+            {
+                // Eroding terrain
+                sedimentDeposit = clamp(change * changeAmount * velocity, 0, maxSediment - drop.sediment);
+            }
+            else
+            {
+                // Depositing onto terrain
+                sedimentDeposit = -drop.sediment / clamp(velocity, 1, 1000);
+            }
+            if (drop.sediment < 0) { drop.sediment = 0; }
+            drop.sediment += sedimentDeposit;
+            drop.volume *= evaporationRate;
+            int indexes[81];
+            NeighbourPoints(index,indexes);
+            int row =((radius * 2)+1);
+            float sediment = sedimentDeposit  / (row*row);
+            for(int j =0; j<100;j++)
+            {
+                if(j >= (row*row))
+                {
+                    break;
+                }
+                verticesBuffer[indexes[j]].y -= sediment;
+            }
+            int newIndex = round(selectedPoint.x + (selectedPoint.z * rowLegnth));
+            drop.currentIndex = newIndex;
+            SetVelocity(selectedIndex, change);
+        }
+        else
+        {
+            //drop is finished deposit last of sediment
+            int endIndexes[81];
+            NeighbourPoints(index,endIndexes);
+            int row =((radius * 2)+1);
+            float sediment =  drop.sediment / (row*row);
+            for(int j =0; j<100;j++)
+            {
+                if(j >= (row*row))
+                {
+                    break;
+                }
+                verticesBuffer[endIndexes[j]].y += sediment;
+            }
+            break;
+        }
+    }
+}
